@@ -1,0 +1,21 @@
+# 索引生成物（运行 python ingest.py 即可重建，无需入库）
+index/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 本地日志
+*.log

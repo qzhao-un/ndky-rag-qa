@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>知问 ZhiWen · 检索召回率评测</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+  body { margin:0; padding:32px; background:#fff; font-family:'PingFang SC','Microsoft YaHei',sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { font-size:20px; color:#1A1B1C; margin:0 0 4px; }
+  .sub { font-size:13px; color:#6B7280; margin-bottom:20px; }
+  #chart { width:100%; height:420px; }
+  .note { font-size:12px; color:#9CA3AF; margin-top:12px; line-height:1.7; }
+  .cards { display:flex; gap:16px; margin:16px 0; flex-wrap:wrap; }
+  .card { flex:1 1 180px; padding:14px 16px; border-radius:12px; background:#F4F3EE; }
+  .card .k { font-size:12px; color:#6B7280; }
+  .card .v { font-size:22px; font-weight:600; color:#1A1B1C; margin-top:4px; }
+  .card .d { font-size:12px; color:#52C41A; margin-top:2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>混合检索 vs 纯向量检索 · Top-K 召回率对比</h1>
+  <div class="sub">知问 ZhiWen RAG 系统 · 19 条人工标注招生问题 · bge-small-zh-v1.5 + jieba BM25 + RRF 融合</div>
+  <div class="cards">
+    <div class="card"><div class="k">纯向量 Top-4 召回率</div><div class="v">63.2%</div></div>
+    <div class="card"><div class="k">混合检索 Top-4 召回率</div><div class="v">89.5%</div><div class="d">↑ +26.3 个百分点</div></div>
+    <div class="card"><div class="k">知识库规模</div><div class="v">845 块</div><div class="d">2158 条真实问答</div></div>
+  </div>
+  <div id="chart"></div>
+  <div class="note">
+    评测口径：对每个标注问题，若正确答案出现在检索结果前 K 条中则记为命中；召回率 = 命中问题数 / 19。<br>
+    复现命令：python eval.py eval_questions.json
+  </div>
+</div>
+<script>
+(function(){
+  var el = document.getElementById('chart');
+  if (typeof echarts === 'undefined') { el.innerHTML = '<p style="color:#999">图表库加载失败</p>'; return; }
+  var chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', triggerOn: 'click', renderMode: 'richText', confine: true,
+      textStyle: { fontSize: 11, lineHeight: 15 }, padding: [6,8],
+      valueFormatter: function(v){ return v + '%'; } },
+    legend: { top: 8, itemWidth: 14, itemHeight: 8, textStyle: { color: '#6B7280', fontSize: 12 } },
+    grid: { left: 40, right: 24, top: 56, bottom: 36, containLabel: true },
+    xAxis: { type: 'category', data: ['Top-1','Top-2','Top-4'],
+      axisLabel: { color: '#555', fontSize: 12 }, axisLine: { lineStyle: { color: '#E4E3DD' } } },
+    yAxis: { type: 'value', max: 100, name: '召回率（%）',
+      axisLabel: { color: '#555', fontSize: 11, formatter: '{value}%' },
+      splitLine: { lineStyle: { color: 'rgba(0,0,0,0.06)' } } },
+    series: [
+      { name: '纯向量检索', type: 'bar', data: [57.9, 63.2, 63.2],
+        itemStyle: { color: '#A3D5E8', borderRadius: [6,6,0,0] }, barGap: '20%',
+        label: { show: true, position: 'top', fontSize: 11, color: '#555', formatter: '{c}%' } },
+      { name: '混合检索（向量+BM25+RRF）', type: 'bar', data: [57.9, 68.4, 89.5],
+        itemStyle: { color: '#5B8FF9', borderRadius: [6,6,0,0] },
+        label: { show: true, position: 'top', fontSize: 11, color: '#1A1B1C', fontWeight: 600, formatter: '{c}%' } }
+    ]
+  });
+  window.addEventListener('resize', function(){ chart.resize(); });
+})();
+</script>
+</body>
+</html>
