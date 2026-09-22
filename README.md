@@ -4,6 +4,10 @@
 >
 > 面向高校招生咨询场景，让大模型通过自主调度多个工具（知识库检索、分数线查询、志愿分档、学校信息），结合考生画像给出个性化招生建议。
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ndky-rag-app-ccqymvrxbvgrybina5g7gv.streamlit.app)
+
+**在线体验**：https://ndky-rag-app-ccqymvrxbvgrybina5g7gv.streamlit.app
+
 ---
 
 ## 一、项目背景
