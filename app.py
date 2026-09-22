@@ -7,6 +7,11 @@
 from datetime import datetime
 
 import streamlit as st
+import os
+
+# Streamlit Cloud Secrets 同步到环境变量（本地开发用环境变量，云端用 Secrets）
+if "LLM_API_KEY" in st.secrets:
+    os.environ["LLM_API_KEY"] = st.secrets["LLM_API_KEY"]
 
 from bm25 import BM25Index
 from config import (
