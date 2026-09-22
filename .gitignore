@@ -1,6 +1,3 @@
-# 索引生成物（运行 python ingest.py 即可重建，无需入库）
-index/
-
 # Python 缓存
 __pycache__/
 *.py[cod]

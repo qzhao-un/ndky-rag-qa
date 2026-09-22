@@ -1,15 +1,5 @@
-# RAG 系统依赖
-# 最小可用（debug 模式跑通全流程只需要 numpy）
 numpy>=1.24
-
-# LLM 调用（OpenAI 兼容接口，DeepSeek/通义/智谱/Ollama 通用）
 openai>=1.30
-
-# 网页界面（可选）
 streamlit>=1.36
-
-# 本地 embedding 模型（可选，local 模式才需要，体积较大）
-# sentence-transformers>=3.0
-
-# PDF 解析（可选，需要读取 PDF 文档时安装）
-# pypdf>=4.0
+sentence-transformers>=3.0
+jieba>=0.42.1

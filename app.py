@@ -1,63 +1,28 @@
 # -*- coding: utf-8 -*-
-"""NDKY 招生咨询问答系统 —— Streamlit 网页界面。
+"""NDKY 招生顾问 Agent —— Streamlit 网页界面。
 用法：streamlit run app.py
-需先 python ingest.py 建好索引，并在 config.py 配置 LLM_API_KEY。
+需先 python ingest.py 建好索引，并在环境变量 LLM_API_KEY 配置大模型 Key。
 """
 
-import re
 from datetime import datetime
 
 import streamlit as st
 
 from bm25 import BM25Index
 from config import (
-    BM25_B, BM25_K1, HYBRID_FUSION, INDEX_PATH, RRF_K, TOP_K, USE_HYBRID,
+    BM25_B, BM25_K1, INDEX_PATH, USE_HYBRID,
 )
-from hybrid import HybridRetriever
-from qa import answer, retrieve, stream_answer
 from retriever import VectorStore
+from agent import KnowledgeSearchTool, run_agent, AGENT_SYSTEM_PROMPT
 
 APP_TITLE = "NDKY 招生咨询"
 
-
-def _clean_body(body: str) -> str:
-    """清理切块残留：去掉单独一行只有"咨"或"询"的残字（切块把"咨询"切断时产生）。"""
-    lines = body.split("\n")
-    cleaned = [ln for ln in lines if ln.strip() not in ("咨", "询", "咨 ", "询 ")]
-    return "\n".join(cleaned).strip()
-
-
-def parse_chunk(text: str):
-    """把一个检索到的文本块拆成若干 (meta_line, qa_body)。
-    meta_line 形如 "咨询 830 · 张** · 2023-06-23 16:02:51"（小字淡化展示）；
-    qa_body 是问/答正文（正常展示）。姓名只留姓，其余打 *。
-    兼容 chunk 被截断、缺少右括号、"咨询"二字被切断等情况。"""
-    # 宽松匹配：咨询 NNN（姓名，日期...）或 咨询 NNN（姓名，2023（截断无右括号）
-    # 姓名 1-4 个汉字（含单字名，如"杨"），含 · 分隔符（复姓/少数民族）
-    pattern = r'(?:##\s*)?咨询\s*(\d+)\s*（([\u4e00-\u9fa5·]{1,4})，(\s*\d{4}[^）\n]*)）?'
-    matches = list(re.finditer(pattern, text))
-    if not matches:
-        return [("", _clean_body(text))]
-    blocks = []
-    if matches[0].start() > 0:
-        tail = text[:matches[0].start()].strip()
-        if tail:
-            blocks.append(("", _clean_body(tail)))
-    for i, m in enumerate(matches):
-        num, name, date = m.group(1), m.group(2), (m.group(3) or "").strip()
-        masked = name[0] + "*" * (len(name) - 1) if len(name) > 1 else name
-        meta = f"咨询 {num} · {masked}" + (f" · {date}" if date else "")
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = _clean_body(text[m.end():end].strip())
-        blocks.append((meta, body))
-    return blocks
-
 st.set_page_config(page_title=APP_TITLE, page_icon="🏫", layout="wide")
 st.title(f"🏫 {APP_TITLE}")
-st.caption("宁波大学科学技术学院招生咨询智能问答 · 基于大模型 RAG")
+st.caption("宁波大学科学技术学院招生顾问 Agent · 知识库问答 + 历年分数 + 志愿分档")
 
 
-# ---------- 初始化（带缓存，避免每次刷新重复加载模型/索引） ----------
+# ---------- 初始化（缓存，不重复加载模型/索引） ----------
 @st.cache_resource
 def load():
     from config import (
@@ -72,26 +37,38 @@ def load():
         bm25 = BM25Index(k1=BM25_K1, b=BM25_B)
         if not bm25.load(INDEX_PATH):
             bm25 = None
-    return embedder, store, bm25
+    tool = KnowledgeSearchTool(embedder, store, bm25, use_hybrid=USE_HYBRID)
+    return tool
 
 
-embedder, store, bm25 = load()
+tool = load()
 
-# ---------- 对话历史（问题记录） ----------
+# ---------- Agent 会话状态 ----------
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
 if "history" not in st.session_state:
-    st.session_state.history = []   # [{"q":..., "a":..., "hits":[...]}]
+    st.session_state.history = []   # [{"q","a","trace","t"}]
 if "selected" not in st.session_state:
-    st.session_state.selected = None  # 当前展示的那条记录，None=空
+    st.session_state.selected = None
 
 with st.sidebar:
     st.subheader("问题记录")
+    # 报考信息画像卡
+    st.markdown("**🧑 我的报考信息**")
+    up_province = st.text_input("省份", value=st.session_state.get("up_province", "浙江"),
+                                 key="up_province")
+    up_score = st.number_input("高考分数", value=float(st.session_state.get("up_score", 0)),
+                                step=1.0, key="up_score")
+    up_major = st.text_input("意向专业", value=st.session_state.get("up_major", ""),
+                              key="up_major")
+    st.caption("填写后，Agent 回答会自动参考这些信息")
+    st.divider()
     if not st.session_state.history:
         st.caption("暂无记录，提问后会显示在这里")
     else:
         for idx in range(len(st.session_state.history) - 1, -1, -1):
             rec = st.session_state.history[idx]
-            q = rec["q"]
-            label = q[:18] + ("…" if len(q) > 18 else "")
+            label = rec["q"][:18] + ("…" if len(rec["q"]) > 18 else "")
             ts = rec.get("t", "")
             if ts:
                 label = f"{label}  ·  {ts}"
@@ -100,63 +77,77 @@ with st.sidebar:
         if st.button("清空记录", use_container_width=True):
             st.session_state.history = []
             st.session_state.selected = None
+            st.session_state.messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
             st.rerun()
 
-def render_refs(hits):
-    """渲染参考依据：判断是否"查不到"，查不到则不展示；否则按片段展开。"""
-    if not hits:
-        return
-    for i, (score, text, meta) in enumerate(hits):
-        st.markdown(f"**片段 {i + 1}**")
-        for meta_line, body in parse_chunk(text):
-            st.write(body)
-            if meta_line:
-                st.caption(meta_line)
-        st.divider()
 
+# ---------- 提问前：清空输入框 ----------
+if st.session_state.pop("_need_clear", False):
+    st.session_state.q_input = ""
 
-def is_no_answer(answer_text):
-    a = answer_text or ""
-    return any(k in a for k in ["暂未查询到", "暂时没有", "资料里", "未找到", "建议直接联系招生办"])
-
-
-# ---------- 问答区 ----------
-question = st.text_input("请输入你的问题：", placeholder="例如：宿舍几人间？录取通知书什么时候发？")
-
-if question:
-    with st.spinner("正在检索..."):
-        try:
-            hits, _, _ = retrieve(question, embedder, store, bm25, use_hybrid=USE_HYBRID)
-        except Exception as e:
-            st.error(f"检索失败：{e}")
-            hits = []
-
-    st.markdown(f"**问：** {question}")
-    # 流式生成回答（打字机效果）
-    answer_text = st.write_stream(stream_answer(question, hits)) or ""
-    rec = {"q": question, "a": answer_text, "hits": hits,
-           "t": datetime.now().strftime("%m-%d %H:%M")}
-    st.session_state.history.append(rec)
-    st.session_state.selected = rec
-
-    if hits and not is_no_answer(answer_text):
-        with st.expander("参考依据（点击展开）", expanded=False):
-            render_refs(hits)
-    st.stop()  # 本次提问已完整展示，不重复走下方历史回看块
-
-# ---------- 展示历史记录 ----------
-sel = st.session_state.selected
-if sel:
-    st.markdown(f"**问：** {sel['q']}")
-    if sel["a"]:
-        st.markdown(sel["a"])
+# ---------- 展示全部历史对话（从上到下，新问题在下面） ----------
+for rec in st.session_state.history:
+    st.markdown(f"**问：** {rec['q']}")
+    if rec.get("trace"):
+        with st.expander("✨ Agent 执行过程", expanded=False):
+            for line in rec["trace"]:
+                st.caption(line)
+    if rec["a"]:
+        st.markdown(rec["a"])
     else:
         st.warning("未能生成回答，请检查 API Key 配置或网络。")
-    if sel["hits"] and not is_no_answer(sel["a"]):
-        with st.expander("参考依据（点击展开）", expanded=False):
-            render_refs(sel["hits"])
-else:
-    st.info("在上方输入问题开始咨询。")
+    if rec.get("sources"):
+        with st.expander("📚 数据来源", expanded=False):
+            for name, url in rec["sources"]:
+                st.markdown(f"- [{name}]({url})")
+    st.divider()
 
-st.divider()
-st.caption("本回答由 AI 基于历史招生咨询自动生成，仅供参考，最终以招生办官方回复为准（电话 0574-87600018）。")
+st.caption("本回答由 AI 基于历年招生咨询与录取数据自动生成，仅供参考，最终以招生办官方回复为准（电话 0574-87600018）。")
+
+# ---------- 底部输入框（chat 风格） ----------
+question = st.chat_input("请输入你的问题，回车发送…", key="q_input")
+
+if question:
+    # 把考生画像注入 system prompt，让 Agent 每轮都知道"谁在问"
+    profile = (f"\n\n【当前考生信息】省份={up_province}；"
+               f"分数={int(up_score) if up_score else '未填'}；"
+               f"意向专业={up_major or '未指定'}。"
+               f"考生追问时自动结合这些信息，不要让他重复说。")
+    st.session_state.messages[0]["content"] = AGENT_SYSTEM_PROMPT + profile
+
+    st.markdown(f"**问：** {question}")
+    think_box = st.expander("✨ Agent 执行过程", expanded=False)
+    think_lines = []
+    answer_chunks = []
+    sources = []
+    try:
+        for kind, payload in run_agent(st.session_state.messages, question, tool):
+            if kind == "think":
+                think_lines.append(payload)
+                with think_box:
+                    for line in think_lines:
+                        st.caption(line)
+            elif kind == "sources":
+                sources = payload
+            else:
+                answer_chunks.append(payload)
+    except Exception as e:
+        st.error(f"生成失败：{e}")
+
+    def _gen():
+        for c in answer_chunks:
+            yield c
+
+    answer_text = st.write_stream(_gen()) or ""
+    if sources:
+        with st.expander("📚 数据来源", expanded=False):
+            for name, url in sources:
+                st.markdown(f"- [{name}]({url})")
+    rec = {
+        "q": question, "a": answer_text, "trace": list(think_lines),
+        "sources": sources, "t": datetime.now().strftime("%m-%d %H:%M"),
+    }
+    st.session_state.history.append(rec)
+    st.session_state.selected = rec
+    st.session_state._need_clear = True   # 下次渲染前清空输入框
+    st.rerun()
