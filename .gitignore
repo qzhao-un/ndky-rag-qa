@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 venv/
 
+# 环境变量（含 API Key，禁止入库）
+.env
+*.env
+
 # Streamlit
 .streamlit/secrets.toml
 

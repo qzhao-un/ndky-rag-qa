@@ -24,7 +24,7 @@
   <div class="sub">知问 ZhiWen RAG 系统 · 19 条人工标注招生问题 · bge-small-zh-v1.5 + jieba BM25 + RRF 融合</div>
   <div class="cards">
     <div class="card"><div class="k">纯向量 Top-4 召回率</div><div class="v">63.2%</div></div>
-    <div class="card"><div class="k">混合检索 Top-4 召回率</div><div class="v">89.5%</div><div class="d">↑ +26.3 个百分点</div></div>
+    <div class="card"><div class="k">混合检索 Top-4 召回率</div><div class="v">94.7%</div><div class="d">↑ +31.6 个百分点</div></div>
     <div class="card"><div class="k">知识库规模</div><div class="v">845 块</div><div class="d">2158 条真实问答</div></div>
   </div>
   <div id="chart"></div>
@@ -54,7 +54,7 @@
       { name: '纯向量检索', type: 'bar', data: [57.9, 63.2, 63.2],
         itemStyle: { color: '#A3D5E8', borderRadius: [6,6,0,0] }, barGap: '20%',
         label: { show: true, position: 'top', fontSize: 11, color: '#555', formatter: '{c}%' } },
-      { name: '混合检索（向量+BM25+RRF）', type: 'bar', data: [57.9, 68.4, 89.5],
+      { name: '混合检索（向量+BM25+RRF）', type: 'bar', data: [63.2, 73.7, 94.7],
         itemStyle: { color: '#5B8FF9', borderRadius: [6,6,0,0] },
         label: { show: true, position: 'top', fontSize: 11, color: '#1A1B1C', fontWeight: 600, formatter: '{c}%' } }
     ]

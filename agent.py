@@ -13,6 +13,7 @@
 """
 
 import json
+import re
 import sys
 
 from bm25 import BM25Index
@@ -135,7 +136,7 @@ def parse_dsml_tool_calls(content):
         return []
     calls = []
     pattern = re.compile(
-        r'invoke\s+name="([^"]+)"(.*?)(?:</.*?invoke>|$)',
+        r'invoke\s+name="([^"]+)"(.*?)(?:</[\w:]*invoke>|$)',
         re.DOTALL
     )
     for match in pattern.finditer(content):
@@ -143,7 +144,7 @@ def parse_dsml_tool_calls(content):
         body = match.group(2)
         args = {}
         param_pattern = re.compile(
-            r'parameter\s+name="([^"]+)"\s+string="([^"]+)">(.*?)</.*?parameter>',
+            r'parameter\s+name="([^"]+)"\s+string="([^"]+)">(.*?)(?:</[\w:]*parameter>|$)',
             re.DOTALL
         )
         for pm in param_pattern.finditer(body):
