@@ -121,32 +121,35 @@ if question:
     st.session_state.messages[0]["content"] = AGENT_SYSTEM_PROMPT + profile
 
     st.markdown(f"**问：** {question}")
-    think_box = st.expander("✨ Agent 执行过程", expanded=False)
     think_lines = []
-    answer_chunks = []
     sources = []
-    try:
+
+    def event_stream():
+        # 直接转发 Agent 的 answer 片段；think/sources 只收集，等流式结束后渲染
         for kind, payload in run_agent(st.session_state.messages, question, tool):
             if kind == "think":
                 think_lines.append(payload)
-                with think_box:
-                    for line in think_lines:
-                        st.caption(line)
             elif kind == "sources":
-                sources = payload
+                sources.extend(payload)
             else:
-                answer_chunks.append(payload)
+                yield payload
+
+    try:
+        answer_text = st.write_stream(event_stream()) or ""
     except Exception as e:
         st.error(f"生成失败：{e}")
+        answer_text = ""
 
-    def _gen():
-        for c in answer_chunks:
-            yield c
-
-    answer_text = st.write_stream(_gen()) or ""
+    # Agent 执行过程（事后可展开查看，不在流式期间嵌套渲染）
+    if think_lines:
+        with st.expander("✨ Agent 执行过程", expanded=False):
+            for line in think_lines:
+                st.caption(line)
     if sources:
+        # 来源去重保序
+        uniq = list(dict.fromkeys(sources))
         with st.expander("📚 数据来源", expanded=False):
-            for name, url in sources:
+            for name, url in uniq:
                 st.markdown(f"- [{name}]({url})")
     rec = {
         "q": question, "a": answer_text, "trace": list(think_lines),

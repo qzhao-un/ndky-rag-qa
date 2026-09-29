@@ -15,6 +15,7 @@
 import json
 import re
 import sys
+import time
 
 from bm25 import BM25Index
 from config import (
@@ -67,6 +68,7 @@ AGENT_SYSTEM_PROMPT = (
     "不要只反问\"要不要我再查XX\"就结束；追问建议放最后一句；\n"
     "- 不要反问\"你想了解哪方面\"让用户重述；查不到就说\"这一项暂时没查到，建议直接联系招生办 0574-87600018\"；\n"
     "- 问分数/位次/冲稳保用对应工具查完再答；查不到再建议打招生办电话，不要编造；\n"
+    "- 决定调用工具时，正文保持简短或留空，不要在工具返回前就写出最终答案；\n"
     "- 用简体中文，简洁亲切。"
 )
 
@@ -162,6 +164,47 @@ def parse_dsml_tool_calls(content):
     return calls
 
 
+def trim_history(messages, keep_turns=6):
+    """裁剪会话历史（原地）：保留第一条 system + 最近 keep_turns 轮完整 [user, assistant] 对。
+    删除条数对齐整对边界，避免删掉 user 留下孤儿 assistant。
+    """
+    max_body = keep_turns * 2
+    body_len = len(messages) - 1
+    if body_len > max_body:
+        drop = body_len - max_body
+        if drop % 2:      # 凑偶数，落点对齐 user 边界
+            drop += 1
+        del messages[1:1 + drop]
+
+
+_RETRYABLE = ("429", "500", "502", "503", "504", "ratelimit",
+              "timeout", "timed out", "connection", "temporarily unavailable")
+
+
+def _is_retryable(exc):
+    s = str(exc).lower()
+    return any(k in s for k in _RETRYABLE)
+
+
+def create_chat_completion(client, max_retries=3, **kwargs):
+    """调 chat.completions.create，对限流(429)/服务端错误(5xx)/超时/连接失败做指数退避重试。
+
+    覆盖建连与首响应阶段（这些错误通常在 create 时即暴露）；
+    stream=True 时，迭代过程中才抛出的错误由上层捕获处理。
+    """
+    delay, last = 1.0, None
+    for attempt in range(max_retries + 1):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            last = e
+            if attempt >= max_retries or not _is_retryable(e):
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise last
+
+
 def run_agent(messages, question, tool, max_steps=4):
     """Agent 主循环（生成器）。
 
@@ -177,7 +220,7 @@ def run_agent(messages, question, tool, max_steps=4):
         return
 
     from openai import OpenAI
-    client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=30.0)
 
     # 本轮起始位置（append user 之后），结束后把 [起点:] 收敛成干净问答对
     messages.append({"role": "user", "content": question})
@@ -189,8 +232,9 @@ def run_agent(messages, question, tool, max_steps=4):
         nonlocal full_answer
         if extra_user_note is not None:
             messages.append({"role": "user", "content": extra_user_note})
-        s = client.chat.completions.create(
-            model=LLM_MODEL, messages=messages, temperature=0.3, stream=True,
+        s = create_chat_completion(
+            client, model=LLM_MODEL, messages=messages,
+            temperature=0.3, stream=True,
         )
         for chunk in s:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -204,46 +248,70 @@ def run_agent(messages, question, tool, max_steps=4):
 
     try:
         for step in range(max_steps):
-            resp = client.chat.completions.create(
+            # 流式调用：正文 content 实时作为答案吐出（真打字机），tool_calls 分片按 index 聚合
+            stream = create_chat_completion(
+                client,
                 model=LLM_MODEL,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.3,
-                stream=False,
+                stream=True,
             )
-            msg = resp.choices[0].message
+            content_parts = []
+            tool_buf = {}
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    content_parts.append(delta.content)
+                    yield ("answer", delta.content)
+                for tcd in (getattr(delta, "tool_calls", None) or []):
+                    b = tool_buf.setdefault(tcd.index, {"id": "", "name": "", "args": ""})
+                    if tcd.id:
+                        b["id"] = tcd.id
+                    if tcd.function:
+                        if tcd.function.name:
+                            b["name"] = tcd.function.name
+                        if tcd.function.arguments:
+                            b["args"] += tcd.function.arguments
+            msg_content = "".join(content_parts)
 
-            # 统一成 [{id, name, arguments(dict)}]，兼容标准 tool_calls 和 DeepSeek DSML 正文调用
+            # 从聚合分片构造统一 tool_calls：[{id,name,arguments(dict)}]
             tool_calls = []
-            for tc in (msg.tool_calls or []):
+            for idx in sorted(tool_buf):
+                b = tool_buf[idx]
+                if not b["name"]:
+                    continue
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(b["args"] or "{}")
                 except Exception:
                     args = {}
-                tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
+                tool_calls.append({
+                    "id": b["id"] or f"call_{step}_{idx}",
+                    "name": b["name"], "arguments": args,
+                })
+            # 兼容 DeepSeek 把工具调用写在正文（DSML）的情况
             if not tool_calls:
-                for i, c in enumerate(parse_dsml_tool_calls(msg.content or "")):
+                for i, c in enumerate(parse_dsml_tool_calls(msg_content)):
                     tool_calls.append({"id": f"dsml_{i}", "name": c["name"], "arguments": c["arguments"]})
 
             if not tool_calls:
-                # msg.content 就是模型第一次生成的最终回答，直接流式吐出，不再重调 LLM
-                messages.append({"role": "assistant", "content": msg.content or ""})
+                # 无工具调用：正文已在流式阶段实时吐出（真打字机），收敛消息后返回
+                messages.append({"role": "assistant", "content": msg_content})
+                full_answer = msg_content or full_answer
                 yield ("sources", list(dict.fromkeys(sources)))
-                if msg.content and msg.content.strip():
-                    full_answer = msg.content
-                    # 模拟打字机效果，按片段吐出
-                    chunk = 40
-                    for i in range(0, len(msg.content), chunk):
-                        yield ("answer", msg.content[i:i + chunk])
-                else:
-                    yield from _stream_final()
+                if not full_answer.strip():
+                    fallback = "抱歉，暂时没查到相关信息，建议直接联系招生办 0574-87600018 确认。"
+                    full_answer = fallback
+                    yield ("answer", fallback)
                 return
 
             # 有工具调用：记录思考，逐个执行，把结果喂回下一轮
             messages.append({
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": msg_content or "",
                 "tool_calls": [
                     {"id": tc["id"], "type": "function",
                      "function": {"name": tc["name"],
@@ -293,9 +361,8 @@ def run_agent(messages, question, tool, max_steps=4):
             {"role": "user", "content": question},
             {"role": "assistant", "content": full_answer},
         ]
-        # 简单控制历史长度：只保留 system + 最近 6 轮问答对（12 条）
-        if len(messages) > 13:
-            messages[1:13] = []  # 删除中间旧轮，保留 system 与最近几轮
+        # 控制历史长度：保留 system + 最近 6 轮完整问答对（按整对边界裁剪）
+        trim_history(messages, keep_turns=6)
 
 
 def build_tool():

@@ -21,8 +21,11 @@ sys.path.insert(0, ROOT)
 from agent import (  # noqa: E402
     AGENT_SYSTEM_PROMPT,
     build_tool,
+    create_chat_completion,
+    _is_retryable,
     parse_dsml_tool_calls,
     run_agent,
+    trim_history,
 )
 from admission import load_scores, query_admission_score  # noqa: E402
 from recommend import recommend_majors  # noqa: E402
@@ -139,13 +142,105 @@ class TestSchoolTool:
 
 
 class TestIndex:
-    @pytest.mark.xfail(reason="P1: 切块500字符超 bge 512token，待降到350并重建索引")
     def test_chunk_size_safe(self):
+        # bge-small-zh 上限 512 token，切块受字符+token双约束
         assert CHUNK_SIZE <= 400
 
     def test_index_files_exist(self):
         assert os.path.exists(os.path.join(ROOT, "index", "vectors.npy"))
         assert os.path.exists(os.path.join(ROOT, "index", "chunks.json"))
+
+
+def _pair(i):
+    return [{"role": "user", "content": f"u{i}"},
+            {"role": "assistant", "content": f"a{i}"}]
+
+
+class TestTrimHistory:
+    def test_no_trim_when_short(self):
+        m = [{"role": "system", "content": "s"}] + _pair(1) + _pair(2)
+        trim_history(m, keep_turns=6)
+        assert len(m) == 5
+
+    def test_trim_to_keep_turns(self):
+        m = [{"role": "system", "content": "s"}]
+        for i in range(10):
+            m += _pair(i)
+        trim_history(m, keep_turns=6)
+        assert len(m) == 13              # system + 6 对
+        assert m[1]["content"] == "u4"   # 保留最后 6 对
+        assert m[-1]["content"] == "a9"
+
+    def test_keeps_pairs_intact(self):
+        m = [{"role": "system", "content": "s"}]
+        for i in range(10):
+            m += _pair(i)
+        trim_history(m, keep_turns=6)
+        body = m[1:]
+        assert all(body[j]["role"] == "user" and body[j + 1]["role"] == "assistant"
+                   for j in range(0, len(body), 2))
+
+    def test_odd_body_does_not_break(self):
+        m = [{"role": "system", "content": "s"}]
+        for i in range(10):
+            m += _pair(i)
+        m.append({"role": "user", "content": "orphan"})
+        trim_history(m, keep_turns=6)    # 异常奇数 body 不报错
+        assert m[0]["role"] == "system"
+
+
+class _FakeCompletions:
+    def __init__(self, outcomes):
+        self.outcomes = outcomes
+        self.calls = 0
+
+    def create(self, **kw):
+        i = min(self.calls, len(self.outcomes) - 1)
+        self.calls += 1
+        out = self.outcomes[i]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
+class _FakeClient:
+    def __init__(self, outcomes):
+        self._comp = _FakeCompletions(outcomes)
+        self.chat = type("Chat", (), {"completions": self._comp})()
+
+
+class TestRetry:
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr("agent.time.sleep", lambda s: None)
+
+    def test_success_first_try(self):
+        c = _FakeClient(["ok"])
+        assert create_chat_completion(c) == "ok"
+        assert c._comp.calls == 1
+
+    def test_retry_then_success(self):
+        c = _FakeClient([Exception("Error 429 rate limit exceeded"), "ok"])
+        assert create_chat_completion(c, max_retries=3) == "ok"
+        assert c._comp.calls == 2
+
+    def test_non_retryable_raises_immediately(self):
+        c = _FakeClient([Exception("400 Bad Request invalid parameters")])
+        with pytest.raises(Exception):
+            create_chat_completion(c, max_retries=3)
+        assert c._comp.calls == 1
+
+    def test_exhaust_retries(self):
+        c = _FakeClient([Exception("503 Service Unavailable")])
+        with pytest.raises(Exception):
+            create_chat_completion(c, max_retries=2)
+        assert c._comp.calls == 3          # 1 + 2 次重试
+
+    def test_is_retryable_judgement(self):
+        assert _is_retryable(Exception("RateLimitError 429"))
+        assert _is_retryable(Exception("read timeout"))
+        assert not _is_retryable(Exception("401 invalid api key"))
+        assert not _is_retryable(Exception("400 bad request"))
 
 
 # ============ 二、集成测试（依赖 LLM，CI 跳过）============

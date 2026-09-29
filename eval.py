@@ -1,96 +1,88 @@
 # -*- coding: utf-8 -*-
-"""RAG 检索效果评测脚本：对比「纯向量检索」vs「混合检索」的 Top-K 召回率。
+"""检索评测（标准 IR 口径）：纯向量 vs 混合检索。
 
-用法：
-  python eval.py                  # 使用内置示例评测集
-  python eval.py my_questions.json  # 使用自定义评测集（JSON 数组）
+评测集 eval_holdout.json：独立改写的问题 + gold 咨询编号（知识库不含改写问题，无泄漏）。
+判定：检索返回的块中若包含 gold 咨询（块内 "## 咨询N" 标题）即相关。
 
-评测集格式（JSON 数组）：
-  [
-    {"question": "RAG 的全称是什么？", "answer_keywords": ["检索增强生成"]},
-    {"question": "文本切块一般多大？", "answer_keywords": ["200", "800"]}
-  ]
+指标：
+  Recall@K = gold 出现在 Top-K 的问题比例
+  MRR      = gold 首次出现位置倒数的平均（候选池 CANDIDATE_N 内，未命中记0）
 
-命中标准：召回的 Top-K 个文本块中，至少有一个块包含该问题的全部 answer_keywords。
-召回率 = 命中问题数 / 总问题数。
-
-【重要】示例文档仅 2 个文本块，评测区分度有限；建议替换为真实业务文档
-（10+ 块）后再跑，得到的召回率数据才可写入简历。
+用法：python eval.py eval_holdout.json
 """
 
 import json
 import os
+import re
 import sys
 
 from bm25 import BM25Index
 from config import (
     BM25_B, BM25_K1, BM25_WEIGHT, EMBED_API_KEY, EMBED_API_MODEL, EMBED_API_URL,
-    EMBED_MODE, EMBED_MODEL_NAME, HYBRID_FUSION, INDEX_PATH, RRF_K, TOP_K,
+    EMBED_MODE, EMBED_MODEL_NAME, HYBRID_FUSION, INDEX_PATH, RRF_K,
     VECTOR_WEIGHT,
 )
 from embedder import build_embedder
 from hybrid import HybridRetriever
 from retriever import VectorStore
 
-# 内置示例评测集（基于 data/sample.md，用户可替换为自己的真实问题）
-DEFAULT_EVAL_SET = [
-    {"question": "RAG 的全称是什么？", "answer_keywords": ["检索增强生成"]},
-    {"question": "大模型为什么会产生幻觉？", "answer_keywords": ["幻觉"]},
-    {"question": "文本切块一般切多大？", "answer_keywords": ["200", "800"]},
-    {"question": "向量检索用什么衡量文本相似度？", "answer_keywords": ["余弦相似度"]},
-    {"question": "RAG 和微调相比有什么优势？", "answer_keywords": ["微调"]},
-]
+CANDIDATE_N = 10          # MRR 计算的候选池大小
+REPORT_KS = (1, 2, 4)     # 报告 Recall@K 的 K 值
+_CONS_RE = re.compile(r"##\s*(咨询\s*\d+)")
 
 
-def load_eval_set(path=None):
-    if path and os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return DEFAULT_EVAL_SET
+def chunk_consult_ids(text):
+    """提取一个块里包含的所有咨询编号（去空格），如 ['咨询21','咨询22']。"""
+    return [re.sub(r"\s+", "", m.group(1)) for m in _CONS_RE.finditer(text)]
 
 
-def is_hit(retrieved_texts, keywords):
-    """判断召回结果中是否至少有一个块包含全部关键词。"""
-    if not keywords:
-        return True
-    for text in retrieved_texts:
-        if all(kw in text for kw in keywords):
-            return True
-    return False
+def rank_of_gold(hits, gold_id):
+    """返回 gold 首次出现的 1-based 排名；候选池内未出现返回 None。"""
+    for rank, hit in enumerate(hits, 1):
+        if gold_id in chunk_consult_ids(hit[1]):
+            return rank
+    return None
 
 
-def evaluate(name, search_fn, eval_set, k_list):
-    """跑评测，返回 {k: 召回率} 和每个问题的详情。"""
-    results = {k: [] for k in k_list}  # k -> [bool, ...]
+def evaluate(search_fn, holdout):
+    """跑评测，返回汇总指标和每条详情。"""
     details = []
-    for item in eval_set:
-        q = item["question"]
-        kws = item.get("answer_keywords", [])
-        hits = search_fn(q, max(k_list))
-        texts = [h[1] for h in hits]
-        row = {"question": q, "keywords": kws}
-        for k in k_list:
-            hit = is_hit(texts[:k], kws)
-            results[k].append(hit)
-            row[f"hit@{k}"] = hit
+    for c in holdout:
+        hits = search_fn(c["question"], CANDIDATE_N)
+        rank = rank_of_gold(hits, c["gold_id"])
+        row = {"id": c["id"], "topic": c["topic"], "question": c["question"],
+               "gold": c["gold_id"], "rank": rank}
+        for k in REPORT_KS:
+            row[f"recall@{k}"] = rank is not None and rank <= k
         details.append(row)
-    rates = {k: sum(v) / len(v) * 100 if v else 0 for k, v in results.items()}
-    return rates, details
+    n = len(details)
+    metrics = {}
+    for k in REPORT_KS:
+        metrics[f"recall@{k}"] = sum(r[f"recall@{k}"] for r in details) / n * 100
+    metrics["mrr"] = sum((1.0 / r["rank"] if r["rank"] else 0.0) for r in details) / n * 100
+    return metrics, details
+
+
+def print_table(name, metrics, details):
+    print(f"\n========== {name} ==========")
+    for c in details:
+        rk = c["rank"] if c["rank"] else "-"
+        mark = "✓" if c["rank"] and c["rank"] <= 4 else "✗"
+        print(f"  {mark} #{c['id']:>2} [{c['topic']}] gold={c['gold']:<7} rank={rk:<3} {c['question'][:34]}")
+    print("  Recall@1={:.1f}%  Recall@2={:.1f}%  Recall@4={:.1f}%  MRR={:.1f}%".format(
+        metrics["recall@1"], metrics["recall@2"], metrics["recall@4"], metrics["mrr"]))
 
 
 def main():
-    eval_path = sys.argv[1] if len(sys.argv) > 1 else None
-    eval_set = load_eval_set(eval_path)
-    print(f"[eval] 评测集：{eval_path or '内置示例'}，共 {len(eval_set)} 个问题")
+    path = sys.argv[1] if len(sys.argv) > 1 else "eval_holdout.json"
+    with open(path, encoding="utf-8") as f:
+        holdout = json.load(f)
+    print(f"[eval] 评测集 {path}：{len(holdout)} 条（独立改写，无泄漏）")
 
     embedder = build_embedder(
         EMBED_MODE, EMBED_MODEL_NAME, EMBED_API_URL, EMBED_API_KEY, EMBED_API_MODEL,
     )
     store = VectorStore(INDEX_PATH)
-    if len(store.chunks) == 0:
-        print("索引为空，请先运行：python ingest.py")
-        return
-
     bm25 = BM25Index(k1=BM25_K1, b=BM25_B)
     bm25.load(INDEX_PATH)
     hybrid = HybridRetriever(
@@ -98,54 +90,25 @@ def main():
         vector_weight=VECTOR_WEIGHT, bm25_weight=BM25_WEIGHT,
     )
 
-    k_list = [1, 2, min(TOP_K, len(store.chunks))]
-    k_list = sorted(set(k_list))
-
-    # 纯向量检索
     def vec_search(q, k):
         return store.search(embedder.embed([q])[0], top_k=k)
 
-    # 混合检索
-    def hybrid_search(q, k):
+    def hyb_search(q, k):
         final, _, _ = hybrid.search(q, embedder.embed([q])[0], top_k=k)
         return final
 
-    print("\n========== 评测结果 ==========")
-    vec_rates, vec_details = evaluate("纯向量", vec_search, eval_set, k_list)
-    hyb_rates, hyb_details = evaluate("混合检索", hybrid_search, eval_set, k_list)
-
-    header = f"{'问题':<28}" + "".join(f"{'向量@'+str(k):>10}" for k in k_list) + "".join(f"{'混合@'+str(k):>10}" for k in k_list)
-    print(header)
-    print("-" * len(header))
-    for i, item in enumerate(eval_set):
-        q = item["question"][:26]
-        row = f"{q:<28}"
-        for k in k_list:
-            row += f"{'✓' if vec_details[i][f'hit@{k}'] else '✗':>10}"
-        for k in k_list:
-            row += f"{'✓' if hyb_details[i][f'hit@{k}'] else '✗':>10}"
-        print(row)
-
-    print("-" * len(header))
-    rate_row = f"{'召回率(%)':<28}"
-    for k in k_list:
-        rate_row += f"{vec_rates[k]:>10.1f}"
-    for k in k_list:
-        rate_row += f"{hyb_rates[k]:>10.1f}"
-    print(rate_row)
+    vec_m, vec_d = evaluate(vec_search, holdout)
+    hyb_m, hyb_d = evaluate(hyb_search, holdout)
+    print_table("纯向量检索", vec_m, vec_d)
+    print_table("混合检索（向量+BM25+RRF）", hyb_m, hyb_d)
 
     print("\n========== 可写入简历的结论 ==========")
-    best_k = k_list[-1]
-    print(f"纯向量检索 Top-{best_k} 召回率：{vec_rates[best_k]:.1f}%")
-    print(f"混合检索 Top-{best_k} 召回率：{hyb_rates[best_k]:.1f}%")
-    diff = hyb_rates[best_k] - vec_rates[best_k]
-    if diff > 0:
-        print(f"混合检索相比纯向量提升：{diff:.1f} 个百分点")
-    elif diff < 0:
-        print(f"混合检索相比纯向量下降：{abs(diff):.1f} 个百分点（建议调参或扩充评测集）")
-    else:
-        print("两者持平（示例文档过小，建议替换为真实文档后重跑）")
-    print("\n提示：替换为真实业务文档（10+ 块）和真实问题后，以上数据可直接写入简历。")
+    print("纯向量 : Recall@1={:.1f}% Recall@2={:.1f}% Recall@4={:.1f}% MRR={:.1f}%".format(
+        vec_m["recall@1"], vec_m["recall@2"], vec_m["recall@4"], vec_m["mrr"]))
+    print("混合   : Recall@1={:.1f}% Recall@2={:.1f}% Recall@4={:.1f}% MRR={:.1f}%".format(
+        hyb_m["recall@1"], hyb_m["recall@2"], hyb_m["recall@4"], hyb_m["mrr"]))
+    print(f"Recall@4 混合相对纯向量变化：{hyb_m['recall@4'] - vec_m['recall@4']:+.1f} 个百分点")
+    print(f"MRR 混合相对纯向量变化：{hyb_m['mrr'] - vec_m['mrr']:+.1f} 个百分点")
 
 
 if __name__ == "__main__":
