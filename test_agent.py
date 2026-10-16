@@ -30,6 +30,7 @@ from agent import (  # noqa: E402
 from admission import load_scores, query_admission_score  # noqa: E402
 from recommend import recommend_majors  # noqa: E402
 from school import school_info  # noqa: E402
+from tuition import query_tuition  # noqa: E402
 from config import CHUNK_SIZE  # noqa: E402
 
 # 标签全部拆开构造，避免源码里直接出现完整标记
@@ -139,6 +140,41 @@ class TestSchoolTool:
         result = school_info()
         assert "0574-87600018" in result
         assert "13277" in result
+
+
+class TestTuitionTool:
+    def test_exact_computer(self):
+        assert "27700" in query_tuition("计算机科学与技术")
+
+    def test_fuzzy_computer(self):
+        assert "27700" in query_tuition("计算机")
+
+    def test_clinical_five_year(self):
+        result = query_tuition("临床医学")
+        assert "27700" in result and "五年" in result
+
+    def test_strip_parenthesis(self):
+        assert "27700" in query_tuition("计算机科学与技术（专升本）")
+
+    def test_lowest_band(self):
+        result = query_tuition("法学")
+        assert "18000" in result
+
+    def test_sino_foreign(self):
+        result = query_tuition("广告学")
+        assert "36000" in result
+
+    def test_dorm_fee(self):
+        result = query_tuition("住宿费多少")
+        assert "1800" in result and "3000" in result
+
+    def test_all_tuition(self):
+        result = query_tuition("")
+        assert "18000" in result and "27700" in result and "广告学" in result
+
+    def test_unknown_major(self):
+        result = query_tuition("不存在的奇葩专业xyz")
+        assert "未" in result or "确认" in result
 
 
 class TestIndex:

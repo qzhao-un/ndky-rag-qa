@@ -29,23 +29,26 @@ from retriever import VectorStore
 from admission import TOOL_SCHEMA as SCORE_TOOL, query_admission_score
 from recommend import TOOL_SCHEMA as RECOMMEND_TOOL, recommend_majors
 from school import TOOL_SCHEMA as SCHOOL_TOOL, school_info
+from tuition import TOOL_SCHEMA as TUITION_TOOL, query_tuition
 
 # ---------- Agent 系统提示 ----------
 AGENT_SYSTEM_PROMPT = (
     "你是宁波大学科学技术学院的招生顾问，负责解答考生关于学校招生的问题。\n"
-    "你是一个会自主规划任务的 Agent，手上有四个工具：\n"
-    "  1) search_knowledge：搜索学校历年真实招生咨询记录（政策、宿舍、转专业、学费、专业介绍等）；\n"
+    "你是一个会自主规划任务的 Agent，手上有五个工具：\n"
+    "  1) search_knowledge：搜索学校历年真实招生咨询记录（政策、宿舍、转专业、专业介绍等）；\n"
     "  2) query_admission_score：查询历年分省分专业录取最高/最低/平均分和位次；\n"
     "  3) recommend_majors：输入考生分数，把各专业分成 保底/稳妥/冲刺/偏险 四档；\n"
-    "  4) school_info：学校硬事实（校区位置、办学性质、招生办电话等，不依赖召回）。\n\n"
+    "  4) school_info：学校硬事实（校区位置、办学性质、招生办电话等，不依赖召回）；\n"
+    "  5) query_tuition：查询各专业学费和住宿费标准（2025 年招生章程官方口径）。\n\n"
     "【任务路由】拿到问题后，先判断意图，再决定调哪个/哪几个工具：\n"
-    "  · 政策/宿舍/转专业/学费/专业介绍 -> search_knowledge\n"
+    "  · 政策/宿舍/转专业/专业介绍 -> search_knowledge\n"
     "  · 某专业历年分数/最高分/最低分/位次 -> query_admission_score\n"
     "  · 我XX分能上什么专业/冲稳保 -> recommend_majors\n"
+    "  · 某专业学费/住宿费/收费标准 -> query_tuition\n"
     "  · 学校在哪/几个校区/什么性质 -> school_info\n"
     "  · 纯问候/闲聊 -> 直接回答，不用工具\n\n"
     "【多工具串联】一个问题可能需要多个工具：例如\"我560分报计算机，学费多少\"，"
-    "要先 recommend_majors 看档位，再 query_admission_score 看计算机分数，再 search_knowledge 查学费，最后整合回答。"
+    "要先 recommend_majors 看档位，再 query_admission_score 看计算机分数，再 query_tuition 查学费，最后整合回答。"
     "每调完一个工具都判断：信息够了吗？不够就接着调下一个；够了就直接作答。\n\n"
     "【硬性要求】凡是涉及学校具体事实，必须真正调用工具去查；"
     "绝对不要只在文字里说\"稍等我查一下\"却不真正调用，也不要凭空编造。\n"
@@ -98,6 +101,7 @@ TOOLS = [
 TOOLS.append(SCORE_TOOL)
 TOOLS.append(RECOMMEND_TOOL)
 TOOLS.append(SCHOOL_TOOL)
+TOOLS.append(TUITION_TOOL)
 
 TOOL_DESC = "可用工具：search_knowledge / query_admission_score"
 
@@ -347,6 +351,12 @@ def run_agent(messages, question, tool, max_steps=4):
                     result = school_info(args.get("topic", ""))
                     yield ("think", "   ↳ 已返回学校事实")
                     sources.append(("学校官网", "https://www.ndky.edu.cn"))
+                elif fname == "query_tuition":
+                    major = args.get("major", "")
+                    yield ("think", f"💰 查学费：{major or '全部专业'}")
+                    result = query_tuition(major)
+                    yield ("think", "   ↳ 已返回学费标准")
+                    sources.append(("招生网 · 2025招生章程", "https://zs.ndky.edu.cn"))
                 else:
                     result = "（未知工具）"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})

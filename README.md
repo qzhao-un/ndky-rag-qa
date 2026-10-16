@@ -2,11 +2,11 @@
 
 > **基于 RAG + Tool Calling 的高校智能招生咨询系统**
 >
-> 面向高校招生咨询场景，让大模型通过自主调度多个工具（知识库检索、分数线查询、志愿分档、学校信息），结合考生画像给出个性化招生建议。
+> 面向高校招生咨询场景，让大模型通过自主调度多个工具（知识库检索、分数线查询、志愿分档、学校信息、学费查询），结合考生画像给出个性化招生建议。
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ndky-rag-app-ccqymvrxbvgrybina5g7gv.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ndky-zs.streamlit.app)
 
-**在线体验**：https://ndky-rag-app-ccqymvrxbvgrybina5g7gv.streamlit.app
+**在线体验**：https://ndky-zs.streamlit.app
 
 ---
 
@@ -79,7 +79,8 @@ Agent 结合考生画像，识别出结构化意图：
 Agent 判断需要：
 - `recommend_majors`（看560分能报哪些专业）
 - `query_admission_score`（查计算机历年分数）
-- `search_knowledge`（查计算机选科要求、学费）
+- `search_knowledge`（查计算机选科要求）
+- `query_tuition`（查计算机学费、住宿费）
 
 **Step 3 · 工具执行**
 - 志愿分档工具：读 `scores.json`，对比2025年各专业最低分，分出保底/稳妥/冲刺/偏险
@@ -139,6 +140,11 @@ LLM 综合用户信息、工具结果、检索资料，输出：专业建议、�
 - 输入：`topic`（可选）
 - 输出：基于2026招生章程的学校基本信息
 
+### 5. `query_tuition`
+- 用途：查各专业学费、住宿费（2025招生章程官方口径，硬事实不依赖召回）
+- 输入：`major`（专业名，可选；支持模糊匹配）
+- 输出：学费/住宿费；无参数返回全部分档表
+
 ---
 
 ## 七、数据流程
@@ -170,6 +176,7 @@ rag-system/
 ├── admission.py        # 分数线查询工具
 ├── recommend.py        # 志愿分档工具
 ├── school.py           # 学校硬事实工具
+├── tuition.py          # 学费/住宿费查询工具
 ├── embedder.py         # bge-small-zh 向量化
 ├── retriever.py        # 手写向量库（NumPy 余弦）
 ├── bm25.py             # 手写 BM25（jieba 分词）
